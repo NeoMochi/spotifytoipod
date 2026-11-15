@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.claude/settings.local.json
+config.json
+synced_tracks.db
+music_library/*
+!music_library/.gitkeep
