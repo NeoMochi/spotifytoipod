@@ -1,3 +1,0 @@
-﻿FROM huihui_ai/qwen3-abliterated:8b-v2
-PARAMETER num_ctx 16384
-PARAMETER temperature 0.2
