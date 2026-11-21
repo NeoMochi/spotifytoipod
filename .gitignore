@@ -7,3 +7,5 @@ playlists.json
 raw_downloads/
 music_library/*
 !music_library/.gitkeep
+playlists.json.broken
+tools/

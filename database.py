@@ -3,7 +3,9 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-DB_PATH = Path(__file__).resolve().parent / "synced_tracks.db"
+import paths
+
+DB_PATH = paths.app_dir() / "synced_tracks.db"
 
 
 def initialize_table():

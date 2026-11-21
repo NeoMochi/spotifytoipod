@@ -10,7 +10,7 @@ from mutagen.id3 import ID3, APIC, USLT
 from PIL import Image
 
 import database
-from zotify_runner import LocalMediaProcessor
+from processor import LocalMediaProcessor
 
 
 class FakeFFmpegProcess:
@@ -67,7 +67,7 @@ class LocalPipelineTests(unittest.TestCase):
             processes.append(process)
             return process
 
-        with patch("zotify_runner.subprocess.Popen", side_effect=fake_popen):
+        with patch("procutil.subprocess.Popen", side_effect=fake_popen):
             self.assertEqual(self.processor.process_playlist("Flying Mix"), 1)
             self.assertEqual(self.processor.process_playlist("Flying Mix"), 0)
 
@@ -93,25 +93,65 @@ class LocalPipelineTests(unittest.TestCase):
             self.assertEqual(artwork.format, "JPEG")
             self.assertEqual(artwork.size, (500, 500))
 
-        playlist = self.music_root / "Playlists" / "Flying Mix.m3u"
+        playlist = self.music_root / "Playlists" / "Flying Mix.m3u8"
         self.assertEqual(
             playlist.read_text(encoding="utf-8").splitlines(),
             ["#EXTM3U", "../Flying Mix/Artist - Song.mp3"],
         )
 
-    def test_missing_artwork_is_not_recorded(self):
+    def test_missing_artwork_is_converted_without_cover(self):
         no_art_playlist = self.raw_root / "No Art"
         no_art_playlist.mkdir()
         source = no_art_playlist / "No Art.flac"
         source.write_bytes(b"local audio placeholder")
 
-        with patch("zotify_runner.subprocess.Popen") as popen:
-            self.processor.process_playlist("No Art")
+        with patch(
+            "procutil.subprocess.Popen",
+            side_effect=lambda command, **_kw: FakeFFmpegProcess(command),
+        ):
+            self.assertEqual(self.processor.process_playlist("No Art"), 1)
 
-        self.assertFalse(popen.called)
-        self.assertFalse(
-            database.check_existing(source_path=str(source))
+        output = self.music_root / "No Art" / "No Art.mp3"
+        self.assertEqual(len(ID3(str(output)).getall("APIC")), 0)
+        self.assertTrue(database.check_existing(source_path=str(source)))
+
+    def test_playlist_follows_spotify_order_and_drops_removed_tracks(self):
+        for name in ("Bravo - B.ogg", "Alpha - A.ogg", "Gone - G.ogg"):
+            (self.playlist_root / name).write_bytes(b"x")
+        (self.playlist_root / ".spotify_order.m3u8").write_text(
+            "#EXTM3U\nC:\\raw\\Bravo - B.mp3\nAlpha - A.mp3\nArtist - Song.mp3\n",
+            encoding="utf-8",
         )
+
+        with patch(
+            "procutil.subprocess.Popen",
+            side_effect=lambda command, **_kw: FakeFFmpegProcess(command),
+        ):
+            self.processor.process_playlist("Flying Mix")
+
+        playlist = self.music_root / "Playlists" / "Flying Mix.m3u8"
+        self.assertEqual(
+            playlist.read_text(encoding="utf-8").splitlines(),
+            [
+                "#EXTM3U",
+                "../Flying Mix/Bravo - B.mp3",
+                "../Flying Mix/Alpha - A.mp3",
+                "../Flying Mix/Artist - Song.mp3",
+            ],
+        )
+
+    def test_failed_download_skips_playlist(self):
+        with patch("processor.fetch_spotify_source", return_value=False), patch(
+            "procutil.subprocess.Popen"
+        ) as popen:
+            result = self.processor.process_playlist(
+                "Flying Mix", source="https://open.spotify.com/playlist/x"
+            )
+
+        self.assertEqual(result, 0)
+        self.assertFalse(popen.called)
+        self.assertEqual(self.processor.failed_playlists, ["Flying Mix"])
+        self.assertFalse((self.music_root / "Playlists").exists())
 
     def test_sidecar_changes_trigger_reprocessing(self):
         processes = []
@@ -121,7 +161,7 @@ class LocalPipelineTests(unittest.TestCase):
             processes.append(process)
             return process
 
-        with patch("zotify_runner.subprocess.Popen", side_effect=fake_popen):
+        with patch("procutil.subprocess.Popen", side_effect=fake_popen):
             self.assertEqual(self.processor.process_playlist("Flying Mix"), 1)
             (self.playlist_root / "Artist - Song.lrc").write_text(
                 "[00:01.00]Updated lyric\n",

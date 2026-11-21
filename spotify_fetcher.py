@@ -1,36 +1,17 @@
 import os
-import subprocess
-import sys
 from pathlib import Path
-from typing import Callable, Dict, List, Tuple
+from typing import Callable
+
+import paths
+from procutil import stream_process
 
 LOG_CALLBACK = Callable[[str], None]
+ORDER_FILE_NAME = ".spotify_order.m3u8"
 
 
-def _stream_process(
-    command: List[str],
-    env: Dict[str, str],
-    log_callback: LOG_CALLBACK,
-) -> Tuple[int, List[str]]:
-    output_lines: List[str] = []
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-        env=env,
-    )
-    if process.stdout is not None:
-        for raw_line in process.stdout:
-            line = raw_line.rstrip("\r\n")
-            if line.strip():
-                log_callback(line)
-            output_lines.append(line)
-    return_code = process.wait()
-    return return_code, output_lines
+def order_file_for(target_dir: Path) -> Path:
+    """Where spotDL records the playlist's tracks in Spotify order."""
+    return Path(target_dir) / ORDER_FILE_NAME
 
 
 def fetch_spotify_source(
@@ -39,6 +20,7 @@ def fetch_spotify_source(
     raw_downloads: Path,
     log_callback: LOG_CALLBACK = print,
 ) -> bool:
+    """Download a Spotify URL (or 'liked') with spotDL. True on success."""
     cleaned_source = (source or "").strip()
     if not cleaned_source:
         return True
@@ -47,16 +29,30 @@ def fetch_spotify_source(
     target_dir = raw_downloads / playlist_name
     target_dir.mkdir(parents=True, exist_ok=True)
 
+    base_command = paths.spotdl_command()
+    if base_command is None:
+        log_callback(
+            "[spotDL Error] spotdl was not found. Put spotdl.exe in the 'tools' "
+            "folder next to the app."
+        )
+        return False
+
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
 
     is_liked = cleaned_source.lower() in {"liked", "saved"}
     spotdl_query = "saved" if is_liked else cleaned_source
 
-    spotdl_cmd = [
-        sys.executable,
-        "-m",
-        "spotdl",
+    order_file = order_file_for(target_dir)
+    try:
+        order_file.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log_callback(f"[spotDL Warning] Could not clear old track order: {exc}")
+
+    spotdl_cmd = base_command + [
         "download",
         spotdl_query,
         "--output",
@@ -67,14 +63,19 @@ def fetch_spotify_source(
         "320k",
         "--fetch-albums",
         "--generate-lrc",
+        "--m3u",
+        str(order_file),
     ]
     if is_liked:
         spotdl_cmd.append("--user-auth")
 
     log_callback(f"[spotDL] Downloading '{playlist_name}' ({cleaned_source})...")
     try:
-        spotdl_code, _ = _stream_process(spotdl_cmd, env, log_callback)
-        return spotdl_code == 0
+        spotdl_code, _ = stream_process(spotdl_cmd, log_callback, env)
     except OSError as exc:
         log_callback(f"[spotDL Error] Could not run spotDL: {exc}")
         return False
+    if spotdl_code != 0:
+        log_callback(f"[spotDL Error] spotDL exited with code {spotdl_code}.")
+        return False
+    return True

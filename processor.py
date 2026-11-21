@@ -3,8 +3,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
-import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -19,9 +17,11 @@ from mutagen.id3 import APIC, ID3, ID3NoHeaderError, TCON, USLT
 from PIL import Image, ImageOps
 
 import database
-from spotify_fetcher import fetch_spotify_source
+import paths
+import procutil
+from spotify_fetcher import fetch_spotify_source, order_file_for
 
-ROOT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = paths.app_dir()
 RAW_DOWNLOADS = ROOT_DIR / "raw_downloads"
 MUSIC_LIBRARY = ROOT_DIR / "music_library"
 PLAYLISTS_DIR = MUSIC_LIBRARY / "Playlists"
@@ -60,7 +60,8 @@ class LocalMediaProcessor:
         self.music_library = Path(music_library)
         self.playlists_dir = self.music_library / "Playlists"
         self.log_callback = log_callback or print
-        self.ffmpeg_path = ffmpeg_path or shutil.which("ffmpeg")
+        self.ffmpeg_path = ffmpeg_path or paths.find_tool("ffmpeg")
+        self.failed_playlists: list = []
         self._genre_cache: Dict[str, str] = {}
 
     def log(self, message: str) -> None:
@@ -333,7 +334,7 @@ class LocalMediaProcessor:
     def _run_ffmpeg(self, source: Path, temp_output: Path) -> None:
         if not self.ffmpeg_path:
             raise RuntimeError(
-                "FFmpeg was not found. Install FFmpeg and add ffmpeg.exe to PATH."
+                "FFmpeg was not found. Put ffmpeg.exe in the 'tools' folder next to the app, or add it to PATH."
             )
 
         command = [
@@ -365,20 +366,7 @@ class LocalMediaProcessor:
             str(temp_output),
         ]
         self.log(f"[FFmpeg] Converting {source.name}")
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
-        if process.stdout is not None:
-            for line in process.stdout:
-                if line.strip():
-                    self.log(line)
-        return_code = process.wait()
+        return_code, _ = procutil.stream_process(command, self.log)
         if return_code != 0:
             raise RuntimeError(f"FFmpeg exited with code {return_code}.")
         if not temp_output.is_file() or temp_output.stat().st_size == 0:
@@ -428,27 +416,78 @@ class LocalMediaProcessor:
         self.log(f"[Ready] {output}")
         return True
 
-    def _write_playlist(self, playlist_name: str, output_root: Path) -> Path:
+    def _read_spotify_order(self, playlist_root: Path):
+        """Track names in Spotify order, as recorded by spotDL (or None)."""
+        order_file = order_file_for(playlist_root)
+        if not order_file.is_file():
+            return None
+        try:
+            lines = order_file.read_text(encoding="utf-8-sig").splitlines()
+        except (OSError, UnicodeError) as exc:
+            self.log(f"[Playlist Warning] Could not read track order: {exc}")
+            return None
+        stems = []
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                stems.append(Path(line.replace("\\", "/")).stem.casefold())
+        return stems or None
+
+    def _write_playlist(
+        self,
+        playlist_name: str,
+        output_root: Path,
+        outputs_by_stem: Dict[str, Path],
+        order,
+    ) -> Path:
         self.playlists_dir.mkdir(parents=True, exist_ok=True)
-        playlist_file = self.playlists_dir / f"{playlist_name}.m3u"
-        tracks = sorted(
-            (
-                path
-                for path in output_root.rglob("*.mp3")
-                if path.is_file() and ".partial." not in path.name
-            ),
-            key=lambda path: path.relative_to(output_root).as_posix().casefold(),
-        )
+        playlist_file = self.playlists_dir / f"{playlist_name}.m3u8"
+
+        tracks = []
+        if order:
+            seen = set()
+            for stem in order:
+                output = outputs_by_stem.get(stem)
+                if output is not None and output.is_file() and output not in seen:
+                    tracks.append(output)
+                    seen.add(output)
+            if tracks:
+                skipped = len(
+                    [p for p in output_root.rglob("*.mp3") if ".partial." not in p.name]
+                ) - len(tracks)
+                if skipped > 0:
+                    self.log(
+                        f"[Playlist] {skipped} file(s) in the folder are no longer in "
+                        "the Spotify playlist and were left out of the playlist file."
+                    )
+        if not tracks:
+            tracks = sorted(
+                (
+                    path
+                    for path in output_root.rglob("*.mp3")
+                    if path.is_file() and ".partial." not in path.name
+                ),
+                key=lambda path: path.relative_to(output_root).as_posix().casefold(),
+            )
+
         relative_paths = [
             Path(os.path.relpath(track, playlist_file.parent)).as_posix()
             for track in tracks
         ]
-        temp_playlist = playlist_file.with_suffix(".m3u.tmp")
+        temp_playlist = playlist_file.with_suffix(".m3u8.tmp")
         with temp_playlist.open("w", encoding="utf-8", newline="\n") as file:
             file.write("#EXTM3U\n")
             for relative_path in relative_paths:
                 file.write(relative_path + "\n")
         temp_playlist.replace(playlist_file)
+
+        old_playlist = self.playlists_dir / f"{playlist_name}.m3u"
+        if old_playlist.is_file():
+            try:
+                old_playlist.unlink()
+                self.log(f"[Playlist] Replaced old {old_playlist.name} with .m3u8")
+            except OSError:
+                pass
         self.log(f"[Playlist] Updated {playlist_file} ({len(tracks)} tracks)")
         return playlist_file
 
@@ -463,12 +502,19 @@ class LocalMediaProcessor:
         output_root = self.music_library / playlist_name
 
         if source and source.strip():
-            fetch_spotify_source(
+            fetched = fetch_spotify_source(
                 source=source,
                 playlist_name=playlist_name,
                 raw_downloads=self.raw_downloads,
                 log_callback=self.log,
             )
+            if not fetched:
+                self.log(
+                    f"[Error] Download failed for '{playlist_name}'; skipping it "
+                    "so the existing files and playlist stay as they were."
+                )
+                self.failed_playlists.append(playlist_name)
+                return 0
 
         if not playlist_root.is_dir():
             self.log(f"[Error] Raw playlist folder does not exist: {playlist_root}")
@@ -485,7 +531,10 @@ class LocalMediaProcessor:
         )
         processed = 0
         used_outputs = set()
+        outputs_by_stem: Dict[str, Path] = {}
         for source_file in sources:
+            if procutil.is_cancelled():
+                raise procutil.Cancelled()
             relative = source_file.relative_to(playlist_root)
             relative_output = relative.with_suffix(".mp3")
             output_key = relative_output.as_posix().casefold()
@@ -496,6 +545,7 @@ class LocalMediaProcessor:
                 output_key = relative_output.as_posix().casefold()
             used_outputs.add(output_key)
             output = output_root / relative_output
+            outputs_by_stem.setdefault(source_file.stem.casefold(), output)
 
             try:
                 if self._process_file(
@@ -506,7 +556,12 @@ class LocalMediaProcessor:
                 self.log(f"[Error] {source_file}: {exc}")
 
         if build_playlist:
-            self._write_playlist(playlist_name, output_root)
+            self._write_playlist(
+                playlist_name,
+                output_root,
+                outputs_by_stem,
+                self._read_spotify_order(playlist_root),
+            )
         else:
             self.log(
                 f"[Playlist] Skipped .m3u generation for '{playlist_name}' (playlist building off)."
@@ -518,7 +573,10 @@ class LocalMediaProcessor:
 
     def process_playlists(self, playlists) -> int:
         total = 0
+        self.failed_playlists = []
         for item in playlists:
+            if procutil.is_cancelled():
+                raise procutil.Cancelled()
             if isinstance(item, dict):
                 name = item.get("name", "")
                 source = item.get("source", "") or ""

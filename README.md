@@ -1,49 +1,61 @@
-# Local Music Prep for iPod Nano 7G
+# Spotify to iPod Nano 7G Prep
 
-A Windows desktop utility that prepares local audio files for manual import into
-MediaMonkey, Apple Devices, or another iPod manager. It does not download audio
-from Spotify or run external downloader commands.
+A Windows desktop app that downloads Spotify playlists, albums and liked songs
+with [spotDL](https://github.com/spotDL/spotify-downloader), converts them to
+iPod-friendly MP3s (cover art, lyrics, tags) and writes a playlist file you can
+import into MediaMonkey, Apple Devices or another iPod manager.
+
+spotDL finds each track's audio on YouTube using Spotify's track information,
+so quality is whatever YouTube offers, re-encoded to 320 kbps MP3.
 
 ## Requirements
 
-- Python 3.10 or newer
-- FFmpeg with `ffmpeg.exe` available on `PATH`
-- Python packages in `requirements.txt`
-
-Install the Python packages and start the app:
+- Python 3.15 (3.11 or newer should also work)
+- FFmpeg (`ffmpeg.exe`), either on `PATH` or in a `tools` folder next to the app
 
 ```powershell
 python -m pip install -r requirements.txt
 python main.py
 ```
 
-Check that FFmpeg is available with `ffmpeg -version`.
+Everything the app creates (`raw_downloads`, `music_library`, `playlists.json`,
+`synced_tracks.db`) is stored next to the app, so the folder can be moved
+anywhere.
 
-## Prepare a playlist
+## Use
 
-1. Copy audio files you are authorized to use into
-   `F:\spotify-ipod\raw_downloads\<Playlist Name>\`. Supported formats are
-   OGG, MP3, M4A, FLAC, and WAV.
-2. Provide cover art embedded in the audio or as a matching image alongside the
-   track (`<track>.jpg`, `.jpeg`, `.png`, `.webp`, or `cover.jpg`,
-   `cover.jpeg`, `cover.png`, or `folder.jpg`).
-3. Optionally add a matching `<track>.lrc` lyrics file.
-4. Add the playlist folder in the app, then click **Sync All Saved Playlists
-   Now**. The optional scheduler checks saved folders while the app is running.
+1. Type a folder name and a Spotify playlist / album URL (or `liked` for liked
+   songs) and click **Add Playlist Folder**. Leave the source blank to prepare
+   audio files you copied into `raw_downloads\<Folder Name>\` yourself
+   (OGG, MP3, M4A, FLAC, WAV).
+2. Click **Sync All Saved Playlists Now**. **Cancel** stops the current job and
+   any spotDL / FFmpeg process it started. An optional scheduler repeats the
+   check while the app is open.
+3. Import `music_library` (and the playlists in `music_library\Playlists`) into
+   MediaMonkey or your iPod manager. The **Open iPod Ready Folder** button opens
+   it.
 
-The app writes normalized 320 kbps CBR, 44.1 kHz stereo MP3s to
-`F:\spotify-ipod\music_library\<Playlist Name>\`, applies loudness
-normalization, embeds square 500x500 JPEG artwork and cleaned LRC lyrics as
-ID3v2.3 tags, and creates a relative-path playlist at
-`F:\spotify-ipod\music_library\Playlists\<Playlist Name>.m3u`.
+For each track the app writes a 320 kbps, 44.1 kHz stereo MP3 with loudness
+normalization, square 500x500 JPEG cover art (from the audio, or a matching
+`.jpg`/`.png` next to it) and cleaned `.lrc` lyrics as ID3v2.3 tags. Tracks with
+no cover art are still converted, with a warning in the log.
 
-Tracks without discoverable cover art are skipped with an error in the log.
-Tracks without an LRC file are processed without a lyrics frame.
+Playlist files are written as `music_library\Playlists\<Folder Name>.m3u8`
+(UTF-8, so accented titles import correctly), in Spotify order. Files that are
+no longer in the Spotify playlist stay in the folder but are left out of the
+playlist file. If a download fails, that folder is skipped and its existing
+files and playlist are left untouched.
 
-The database at `synced_tracks.db` skips unchanged source files on later runs.
-The **Open iPod Ready Folder** button opens the prepared library; importing it
-onto the iPod is done with your chosen media manager.
+`synced_tracks.db` lets later runs skip tracks that are already prepared. Your
+folders and the scheduler interval are saved in `playlists.json`; if that file
+becomes unreadable the app keeps a copy as `playlists.json.broken`.
 
-Playlist names and the auto-check interval are saved locally in
-`playlists.json`. Raw downloads, generated playlists, and the database are
-excluded from version control.
+## Tests
+
+```powershell
+python -m pytest tests
+```
+
+## License
+
+MIT License

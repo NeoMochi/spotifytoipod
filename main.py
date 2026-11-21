@@ -2,6 +2,7 @@ import json
 import math
 import os
 import queue
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -9,14 +10,16 @@ from pathlib import Path
 import customtkinter as ctk
 from tkinter import messagebox
 
-from zotify_runner import (
+import paths
+import procutil
+from processor import (
     LocalMediaProcessor,
     MUSIC_LIBRARY,
     RAW_DOWNLOADS,
     validate_playlist_name,
 )
 
-ROOT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = paths.app_dir()
 PLAYLISTS_FILE = ROOT_DIR / "playlists.json"
 DEFAULT_INTERVAL_HOURS = 6.0
 MAX_AFTER_MILLISECONDS = 2_000_000_000
@@ -118,6 +121,15 @@ class App(ctk.CTk):
             self.playlists = []
             self.interval_hours = DEFAULT_INTERVAL_HOURS
             self.append_log(f"[Config Error] {exc}; using an empty playlist list.")
+            backup = PLAYLISTS_FILE.with_name("playlists.json.broken")
+            try:
+                shutil.copy2(PLAYLISTS_FILE, backup)
+                self.append_log(
+                    f"[Config] Kept a copy of the unreadable file as {backup.name} "
+                    "so it is not lost when settings are saved."
+                )
+            except OSError:
+                pass
 
         self.processor = LocalMediaProcessor(log_callback=self.append_log)
         self._build_ui()
@@ -221,6 +233,15 @@ class App(ctk.CTk):
             command=self.sync_all_saved_playlists,
         )
         self.sync_button.grid(row=0, column=0, padx=(0, 6), sticky="ew")
+        self.cancel_button = ctk.CTkButton(
+            button_frame,
+            text="Cancel",
+            fg_color="#b3402f",
+            hover_color="#8f3224",
+            state="disabled",
+            command=self.cancel_sync,
+        )
+        self.cancel_button.grid(row=1, column=0, columnspan=3, pady=(8, 0), sticky="ew")
         ctk.CTkButton(
             button_frame,
             text="Open Raw Downloads",
@@ -473,12 +494,23 @@ class App(ctk.CTk):
         origin = "scheduled check" if scheduled else "manual check"
         self.append_log(f"[Start] {origin}: {len(playlists_to_sync)} folder(s).")
 
+        procutil.reset_cancel()
+
         def worker():
             try:
                 processed = self.processor.process_playlists(playlists_to_sync)
-                self.append_log(
-                    f"[Done] {origin}: prepared {processed} new track(s)."
-                )
+                failed = self.processor.failed_playlists
+                if failed:
+                    self.append_log(
+                        f"[Done with errors] {origin}: prepared {processed} new "
+                        f"track(s); download failed for: {', '.join(failed)}."
+                    )
+                else:
+                    self.append_log(
+                        f"[Done] {origin}: prepared {processed} new track(s)."
+                    )
+            except procutil.Cancelled:
+                self.append_log("[Cancelled] Stopped before finishing.")
             except Exception as exc:
                 self.append_log(f"[Error] Playlist processing failed: {exc}")
             finally:
@@ -489,11 +521,17 @@ class App(ctk.CTk):
     def set_busy(self, busy):
         self.is_running = busy
         self.sync_button.configure(state="disabled" if busy else "normal")
+        self.cancel_button.configure(state="normal" if busy else "disabled")
         if busy:
             self.progress_bar.start()
         else:
             self.progress_bar.stop()
             self.progress_bar.set(0)
+
+    def cancel_sync(self):
+        if self.is_running:
+            self.append_log("[Cancel] Stopping...")
+            procutil.request_cancel()
 
     def open_folder(self, folder):
         try:
@@ -504,6 +542,7 @@ class App(ctk.CTk):
 
     def _on_close(self):
         self._closing = True
+        procutil.request_cancel()
         if self._scheduler_after_id is not None:
             self.after_cancel(self._scheduler_after_id)
         self.destroy()
