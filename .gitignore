@@ -3,5 +3,9 @@ __pycache__/
 .claude/settings.local.json
 config.json
 synced_tracks.db
+playlists.json
+raw_downloads/
 music_library/*
 !music_library/.gitkeep
+playlists.json.broken
+tools/
